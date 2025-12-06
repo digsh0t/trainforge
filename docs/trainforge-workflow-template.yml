@@ -1,0 +1,616 @@
+# TrainForge ML Training Workflow
+#
+# Copy this file to your repository: .github/workflows/trainforge.yml
+#
+# Required GitHub Secrets:
+#   AWS_ACCESS_KEY_ID     - Your AWS access key
+#   AWS_SECRET_ACCESS_KEY - Your AWS secret key
+#   AWS_REGION            - AWS region (e.g., us-east-1)
+#
+# Optional Secrets:
+#   TRAINFORGE_WEBHOOK_URL - Webhook URL for status updates (get from TrainForge dashboard)
+#
+# Usage:
+#   1. Go to Actions tab in your repo
+#   2. Select "TrainForge ML Training"
+#   3. Click "Run workflow"
+#   4. Select your template and configure options
+#   5. Click "Run workflow" button
+
+name: TrainForge ML Training
+
+on:
+  workflow_dispatch:
+    inputs:
+      template:
+        description: 'Training template'
+        required: true
+        default: 'cpu-small'
+        type: choice
+        options:
+          - cpu-small # 2 vCPU, 4GB RAM - $0.05/hr
+          - cpu-large # 8 vCPU, 32GB RAM - $0.20/hr
+          - gpu-t4 # NVIDIA T4, 4 vCPU, 16GB RAM - $0.75/hr
+          - gpu-a10 # NVIDIA A10G, 8 vCPU, 32GB RAM - $1.50/hr
+
+      run_command:
+        description: 'Command to run training (e.g., "python train.py" or "./train.sh" or "pip install torch && python train.py")'
+        required: true
+        default: 'python train.py'
+
+      requirements_file:
+        description: 'Path to requirements.txt (leave empty if none)'
+        required: false
+        default: 'requirements.txt'
+
+      max_runtime_hours:
+        description: 'Maximum runtime in hours (auto-terminates after)'
+        required: true
+        default: '2'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '4'
+          - '8'
+          - '12'
+          - '24'
+
+      instance_storage_gb:
+        description: 'Storage size in GB'
+        required: true
+        default: '100'
+
+      artifacts_path:
+        description: 'Paths to download as artifacts (comma-separated, e.g., "results/,model.pt,checkpoints/")'
+        required: false
+        default: 'results/'
+
+env:
+  TF_VAR_project_name: trainforge-${{ github.repository_owner }}-${{ github.run_id }}
+  TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
+
+jobs:
+  validate:
+    name: Validate Configuration
+    runs-on: ubuntu-latest
+    outputs:
+      template: ${{ steps.validate.outputs.template }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate inputs
+        id: validate
+        run: |
+          echo "template=${{ inputs.template }}" >> $GITHUB_OUTPUT
+
+          # Validate run_command is provided
+          if [ -z "${{ inputs.run_command }}" ]; then
+            echo "::error::Run command is required"
+            exit 1
+          fi
+
+          # Check requirements file if specified
+          if [ -n "${{ inputs.requirements_file }}" ] && [ "${{ inputs.requirements_file }}" != "requirements.txt" ]; then
+            if [ ! -f "${{ inputs.requirements_file }}" ]; then
+              echo "::error::Requirements file '${{ inputs.requirements_file }}' not found"
+              exit 1
+            fi
+          fi
+
+          echo "✅ Configuration validated"
+
+      - name: Notify TrainForge - Started
+        if: ${{ env.TRAINFORGE_WEBHOOK_URL != '' }}
+        env:
+          TRAINFORGE_WEBHOOK_URL: ${{ secrets.TRAINFORGE_WEBHOOK_URL }}
+        run: |
+          curl -X POST "$TRAINFORGE_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "event": "job.started",
+              "repository": "${{ github.repository }}",
+              "run_id": "${{ github.run_id }}",
+              "template": "${{ inputs.template }}",
+              "triggered_by": "${{ github.actor }}"
+            }' || true
+
+  provision:
+    name: Provision Infrastructure
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      instance_ip: ${{ steps.terraform.outputs.instance_ip }}
+      instance_id: ${{ steps.terraform.outputs.instance_id }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.0
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Create Terraform configuration
+        run: |
+          mkdir -p .trainforge/terraform
+          cat > .trainforge/terraform/main.tf << 'EOF'
+          terraform {
+            required_version = ">= 1.0"
+            required_providers {
+              aws = {
+                source  = "hashicorp/aws"
+                version = "~> 5.0"
+              }
+            }
+          }
+
+          provider "aws" {
+            region = var.aws_region
+          }
+
+          variable "aws_region" {
+            type = string
+          }
+
+          variable "project_name" {
+            type = string
+          }
+
+          variable "instance_type" {
+            type = string
+          }
+
+          variable "ami_id" {
+            type = string
+          }
+
+          variable "storage_gb" {
+            type    = number
+            default = 100
+          }
+
+          # SSH Key
+          resource "tls_private_key" "ssh" {
+            algorithm = "RSA"
+            rsa_bits  = 4096
+          }
+
+          resource "aws_key_pair" "training" {
+            key_name   = "${var.project_name}-key"
+            public_key = tls_private_key.ssh.public_key_openssh
+          }
+
+          # Security Group
+          resource "aws_security_group" "training" {
+            name        = "${var.project_name}-sg"
+            description = "TrainForge training instance security group"
+
+            ingress {
+              from_port   = 22
+              to_port     = 22
+              protocol    = "tcp"
+              cidr_blocks = ["0.0.0.0/0"]
+            }
+
+            egress {
+              from_port   = 0
+              to_port     = 0
+              protocol    = "-1"
+              cidr_blocks = ["0.0.0.0/0"]
+            }
+
+            tags = {
+              Name    = "${var.project_name}-sg"
+              Project = "trainforge"
+            }
+          }
+
+          # EC2 Instance
+          resource "aws_instance" "training" {
+            ami           = var.ami_id
+            instance_type = var.instance_type
+            key_name      = aws_key_pair.training.key_name
+
+            vpc_security_group_ids = [aws_security_group.training.id]
+
+            root_block_device {
+              volume_size = var.storage_gb
+              volume_type = "gp3"
+            }
+
+            tags = {
+              Name    = "${var.project_name}-instance"
+              Project = "trainforge"
+            }
+          }
+
+          output "instance_ip" {
+            value = aws_instance.training.public_ip
+          }
+
+          output "instance_id" {
+            value = aws_instance.training.id
+          }
+
+          output "ssh_private_key" {
+            value     = tls_private_key.ssh.private_key_pem
+            sensitive = true
+          }
+          EOF
+
+      - name: Select template configuration
+        id: template
+        run: |
+          case "${{ inputs.template }}" in
+            "cpu-small")
+              echo "instance_type=t3.medium" >> $GITHUB_OUTPUT
+              echo "ami_id=ami-0c7217cdde317cfec" >> $GITHUB_OUTPUT  # Ubuntu 22.04
+              ;;
+            "cpu-large")
+              echo "instance_type=t3.2xlarge" >> $GITHUB_OUTPUT
+              echo "ami_id=ami-0c7217cdde317cfec" >> $GITHUB_OUTPUT
+              ;;
+            "gpu-t4")
+              echo "instance_type=g4dn.xlarge" >> $GITHUB_OUTPUT
+              echo "ami_id=ami-0c7217cdde317cfec" >> $GITHUB_OUTPUT  # Will use Deep Learning AMI
+              ;;
+            "gpu-a10")
+              echo "instance_type=g5.xlarge" >> $GITHUB_OUTPUT
+              echo "ami_id=ami-0c7217cdde317cfec" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Terraform Init
+        working-directory: .trainforge/terraform
+        run: terraform init
+
+      - name: Terraform Apply
+        id: terraform
+        working-directory: .trainforge/terraform
+        run: |
+          terraform apply -auto-approve \
+            -var="instance_type=${{ steps.template.outputs.instance_type }}" \
+            -var="ami_id=${{ steps.template.outputs.ami_id }}" \
+            -var="storage_gb=${{ inputs.instance_storage_gb }}"
+
+          echo "instance_ip=$(terraform output -raw instance_ip)" >> $GITHUB_OUTPUT
+          echo "instance_id=$(terraform output -raw instance_id)" >> $GITHUB_OUTPUT
+
+          # Save SSH key for later use
+          terraform output -raw ssh_private_key > ../ssh_key.pem
+          chmod 600 ../ssh_key.pem
+
+      - name: Upload Terraform state
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-state
+          path: |
+            .trainforge/terraform/terraform.tfstate
+            .trainforge/ssh_key.pem
+          retention-days: 1
+
+      - name: Notify TrainForge - Provisioned
+        if: ${{ env.TRAINFORGE_WEBHOOK_URL != '' }}
+        env:
+          TRAINFORGE_WEBHOOK_URL: ${{ secrets.TRAINFORGE_WEBHOOK_URL }}
+        run: |
+          curl -X POST "$TRAINFORGE_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "event": "job.provisioned",
+              "repository": "${{ github.repository }}",
+              "run_id": "${{ github.run_id }}",
+              "instance_ip": "${{ steps.terraform.outputs.instance_ip }}",
+              "instance_id": "${{ steps.terraform.outputs.instance_id }}"
+            }' || true
+
+  train:
+    name: Run Training
+    needs: provision
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.max_runtime_hours) * 60 }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Terraform state
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-state
+          path: .trainforge
+
+      - name: Wait for instance to be ready
+        run: |
+          echo "Waiting for instance to be ready..."
+          sleep 60
+
+      - name: Setup SSH
+        run: |
+          chmod 600 .trainforge/ssh_key.pem
+          mkdir -p ~/.ssh
+          echo "StrictHostKeyChecking no" >> ~/.ssh/config
+
+      - name: Copy code to instance
+        run: |
+          rsync -avz -e "ssh -i .trainforge/ssh_key.pem" \
+            --exclude='.git' \
+            --exclude='.trainforge' \
+            --exclude='node_modules' \
+            --exclude='__pycache__' \
+            ./ ubuntu@${{ needs.provision.outputs.instance_ip }}:~/training/
+
+      - name: Setup training environment
+        run: |
+          ssh -i .trainforge/ssh_key.pem ubuntu@${{ needs.provision.outputs.instance_ip }} << 'SETUP'
+            set -e
+            cd ~/training
+            
+            # Install Python if not present
+            if ! command -v python3 &> /dev/null; then
+              sudo apt-get update
+              sudo apt-get install -y python3 python3-pip python3-venv
+            fi
+            
+            # Create virtual environment
+            python3 -m venv venv
+            source venv/bin/activate
+            
+            # Install requirements if file exists
+            if [ -f "${{ inputs.requirements_file }}" ]; then
+              pip install -r "${{ inputs.requirements_file }}"
+            fi
+            
+            echo "✅ Environment setup complete"
+          SETUP
+
+      - name: Run training
+        run: |
+          ssh -i .trainforge/ssh_key.pem ubuntu@${{ needs.provision.outputs.instance_ip }} << 'TRAIN'
+            set -e
+            cd ~/training
+            source venv/bin/activate
+            
+            echo "🚀 Starting training..."
+            echo "Command: ${{ inputs.run_command }}"
+            echo "---"
+            
+            # Run the user's command
+            ${{ inputs.run_command }}
+            
+            echo "---"
+            echo "✅ Training complete!"
+          TRAIN
+
+      - name: Download results
+        run: |
+          mkdir -p results
+
+          # Parse comma-separated artifact paths
+          ARTIFACT_PATHS="${{ inputs.artifacts_path }}"
+          IFS=',' read -ra PATHS <<< "$ARTIFACT_PATHS"
+
+          for path in "${PATHS[@]}"; do
+            # Trim whitespace
+            path=$(echo "$path" | xargs)
+            
+            if [ -n "$path" ]; then
+              echo "📥 Downloading: $path"
+              rsync -avz -e "ssh -i .trainforge/ssh_key.pem" \
+                "ubuntu@${{ needs.provision.outputs.instance_ip }}:~/training/$path" \
+                ./results/ 2>/dev/null || echo "  ⚠️ Not found: $path"
+            fi
+          done
+
+          # Always try to download common model file extensions as fallback
+          echo "📥 Checking for common model files..."
+          rsync -avz -e "ssh -i .trainforge/ssh_key.pem" \
+            ubuntu@${{ needs.provision.outputs.instance_ip }}:~/training/*.pt \
+            ./results/ 2>/dev/null || true
+          rsync -avz -e "ssh -i .trainforge/ssh_key.pem" \
+            ubuntu@${{ needs.provision.outputs.instance_ip }}:~/training/*.pth \
+            ./results/ 2>/dev/null || true
+          rsync -avz -e "ssh -i .trainforge/ssh_key.pem" \
+            ubuntu@${{ needs.provision.outputs.instance_ip }}:~/training/*.h5 \
+            ./results/ 2>/dev/null || true
+          rsync -avz -e "ssh -i .trainforge/ssh_key.pem" \
+            ubuntu@${{ needs.provision.outputs.instance_ip }}:~/training/*.onnx \
+            ./results/ 2>/dev/null || true
+
+          echo "✅ Download complete"
+          ls -la results/ || echo "No results downloaded"
+
+      - name: Upload training results
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-results
+          path: results/
+          retention-days: 30
+
+      - name: Notify TrainForge - Training Complete
+        if: ${{ env.TRAINFORGE_WEBHOOK_URL != '' }}
+        env:
+          TRAINFORGE_WEBHOOK_URL: ${{ secrets.TRAINFORGE_WEBHOOK_URL }}
+        run: |
+          curl -X POST "$TRAINFORGE_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "event": "job.training_complete",
+              "repository": "${{ github.repository }}",
+              "run_id": "${{ github.run_id }}",
+              "status": "success"
+            }' || true
+
+  cleanup:
+    name: Cleanup Infrastructure
+    needs: [provision, train]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download Terraform state
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-state
+          path: .trainforge
+        continue-on-error: true
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Create Terraform configuration
+        run: |
+          mkdir -p .trainforge/terraform
+          cat > .trainforge/terraform/main.tf << 'EOF'
+          terraform {
+            required_version = ">= 1.0"
+            required_providers {
+              aws = {
+                source  = "hashicorp/aws"
+                version = "~> 5.0"
+              }
+            }
+          }
+
+          provider "aws" {
+            region = var.aws_region
+          }
+
+          variable "aws_region" {
+            type = string
+          }
+
+          variable "project_name" {
+            type = string
+          }
+
+          variable "instance_type" {
+            type    = string
+            default = "t3.medium"
+          }
+
+          variable "ami_id" {
+            type    = string
+            default = "ami-0c7217cdde317cfec"
+          }
+
+          variable "storage_gb" {
+            type    = number
+            default = 100
+          }
+
+          resource "tls_private_key" "ssh" {
+            algorithm = "RSA"
+            rsa_bits  = 4096
+          }
+
+          resource "aws_key_pair" "training" {
+            key_name   = "${var.project_name}-key"
+            public_key = tls_private_key.ssh.public_key_openssh
+          }
+
+          resource "aws_security_group" "training" {
+            name        = "${var.project_name}-sg"
+            description = "TrainForge training instance security group"
+
+            ingress {
+              from_port   = 22
+              to_port     = 22
+              protocol    = "tcp"
+              cidr_blocks = ["0.0.0.0/0"]
+            }
+
+            egress {
+              from_port   = 0
+              to_port     = 0
+              protocol    = "-1"
+              cidr_blocks = ["0.0.0.0/0"]
+            }
+
+            tags = {
+              Name    = "${var.project_name}-sg"
+              Project = "trainforge"
+            }
+          }
+
+          resource "aws_instance" "training" {
+            ami           = var.ami_id
+            instance_type = var.instance_type
+            key_name      = aws_key_pair.training.key_name
+
+            vpc_security_group_ids = [aws_security_group.training.id]
+
+            root_block_device {
+              volume_size = var.storage_gb
+              volume_type = "gp3"
+            }
+
+            tags = {
+              Name    = "${var.project_name}-instance"
+              Project = "trainforge"
+            }
+          }
+
+          output "instance_ip" {
+            value = aws_instance.training.public_ip
+          }
+
+          output "instance_id" {
+            value = aws_instance.training.id
+          }
+
+          output "ssh_private_key" {
+            value     = tls_private_key.ssh.private_key_pem
+            sensitive = true
+          }
+          EOF
+
+      - name: Move state file
+        run: |
+          if [ -f ".trainforge/terraform.tfstate" ]; then
+            mv .trainforge/terraform.tfstate .trainforge/terraform/
+          fi
+
+      - name: Terraform Init
+        working-directory: .trainforge/terraform
+        run: terraform init
+
+      - name: Terraform Destroy
+        working-directory: .trainforge/terraform
+        run: |
+          terraform destroy -auto-approve \
+            -var="instance_type=t3.medium" \
+            -var="ami_id=ami-0c7217cdde317cfec" \
+            -var="storage_gb=${{ inputs.instance_storage_gb }}" || true
+        continue-on-error: true
+
+      - name: Notify TrainForge - Completed
+        if: ${{ env.TRAINFORGE_WEBHOOK_URL != '' }}
+        env:
+          TRAINFORGE_WEBHOOK_URL: ${{ secrets.TRAINFORGE_WEBHOOK_URL }}
+        run: |
+          curl -X POST "$TRAINFORGE_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "event": "job.completed",
+              "repository": "${{ github.repository }}",
+              "run_id": "${{ github.run_id }}",
+              "status": "${{ needs.train.result }}"
+            }' || true

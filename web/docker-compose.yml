@@ -1,0 +1,69 @@
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    container_name: trainforge-db
+    environment:
+      POSTGRES_USER: trainforge
+      POSTGRES_PASSWORD: trainforge_dev_password
+      POSTGRES_DB: trainforge
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trainforge -d trainforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: trainforge-backend
+    environment:
+      # GitHub App Configuration (override with .env file)
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-placeholder}
+      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-placeholder}
+      GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-placeholder}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-placeholder}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-dev_webhook_secret}
+      # Database
+      DATABASE_URL: postgresql://trainforge:trainforge_dev_password@db:5432/trainforge
+      # Security
+      SECRET_KEY: ${SECRET_KEY:-dev_secret_key_change_in_production_abc123}
+      # Frontend URL
+      FRONTEND_URL: http://localhost:3000
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Mount for development hot-reload (optional, comment out for production)
+      - ./backend/app:/app/app:ro
+    command: >
+      sh -c "
+        echo 'Running database migrations...' &&
+        alembic upgrade head &&
+        echo 'Starting server...' &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+
+  # Next.js Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: trainforge-frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:

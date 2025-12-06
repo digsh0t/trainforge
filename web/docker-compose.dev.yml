@@ -1,0 +1,81 @@
+# Development Docker Compose with hot-reloading
+# Use: docker compose -f docker-compose.dev.yml up
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    container_name: trainforge-db
+    environment:
+      POSTGRES_USER: trainforge
+      POSTGRES_PASSWORD: trainforge_dev_password
+      POSTGRES_DB: trainforge
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trainforge -d trainforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Backend (Development with hot-reload)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: trainforge-backend
+    environment:
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-placeholder}
+      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-placeholder}
+      GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-placeholder}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-placeholder}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-dev_webhook_secret}
+      DATABASE_URL: postgresql://trainforge:trainforge_dev_password@db:5432/trainforge
+      SECRET_KEY: ${SECRET_KEY:-dev_secret_key_change_in_production_abc123}
+      FRONTEND_URL: http://localhost:3000
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Mount source code for hot-reloading
+      - ./backend/app:/app/app
+      - ./backend/alembic:/app/alembic
+    command: >
+      sh -c "
+        echo 'Running database migrations...' &&
+        alembic upgrade head &&
+        echo 'Starting development server with hot-reload...' &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+
+  # Next.js Frontend (Development with hot-reload)
+  frontend:
+    image: node:20-alpine
+    container_name: trainforge-frontend
+    working_dir: /app
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api
+      # Disable Next.js telemetry
+      NEXT_TELEMETRY_DISABLED: 1
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    volumes:
+      # Mount source code for hot-reloading
+      - ./frontend:/app
+      # Use anonymous volume for node_modules to avoid conflicts
+      - /app/node_modules
+      - /app/.next
+    command: >
+      sh -c "
+        npm install &&
+        npm run dev
+      "
+
+volumes:
+  postgres_data:
