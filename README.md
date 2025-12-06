@@ -1,102 +1,51 @@
-# AI Training Cluster
+# TrainForge
 
-A cloud-based AI training cluster for running containerized machine learning workloads on GPU-enabled infrastructure. Built with Infrastructure-as-Code for reproducibility and easy deployment.
+Self-service ML training platform. Click a button, train on cloud GPUs using your own AWS account via GitHub Actions. No credential sharing required.
 
-## 🎯 Features
+## Features
 
-- **GPU-Accelerated Training**: Provision GPU instances (NVIDIA T4) for ML model training
-- **Infrastructure-as-Code**: Complete AWS infrastructure defined in Terraform
-- **Containerized Workloads**: Docker-based training jobs for consistency
-- **Experiment Tracking**: MLflow integration for metrics, parameters, and artifacts
-- **Cloud Storage**: S3 bucket for datasets, checkpoints, and model artifacts
-- **Security**: IAM roles with least-privilege access, VPC isolation
+- One-click training via GitHub Actions
+- Runs on your AWS infrastructure (you control costs)
+- GitHub App for workflow automation
+- Terraform templates for different workloads (CPU/GPU)
+- Web UI for job submission and monitoring
+- Auto-cleanup after training completes
 
-## 📁 Project Structure
+## Structure
 
 ```
-ai-training-cluster-setup/
-├── terraform/                 # Infrastructure-as-Code
-│   ├── main.tf               # Main orchestration
-│   ├── variables.tf          # Input variables
-│   ├── outputs.tf            # Output values
-│   ├── providers.tf          # AWS provider config
-│   └── modules/
-│       ├── networking/       # VPC, subnets, security groups
-│       ├── storage/          # S3 bucket configuration
-│       ├── iam/              # IAM roles and policies
-│       └── compute/          # EC2 GPU instances
-├── docker/                   # Training container
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── src/
-│       ├── train.py          # Training script
-│       ├── model.py          # CNN model definition
-│       └── utils.py          # Helper functions
-├── scripts/                  # Utility scripts
-│   ├── build-image.sh        # Build Docker image
-│   ├── run-training-local.sh # Local training
-│   └── submit-training-job.sh # Remote job submission
-├── Makefile                  # Convenience commands
-└── README.md
+trainforge/
+├── web/
+│   ├── frontend/          # Next.js UI
+│   ├── backend/           # FastAPI + PostgreSQL
+│   └── docker-compose.yml
+├── k8s/                   # Kubernetes manifests
+├── terraform/             # AWS infrastructure templates
+│   ├── modules/           # Reusable modules
+│   └── examples/          # Template configs (cpu-small, gpu-t4, etc)
+└── docs/
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
-### Prerequisites
+### For Users
 
-- [Terraform](https://terraform.io/) >= 1.0
-- [AWS CLI](https://aws.amazon.com/cli/) configured with credentials
-- [Docker](https://docker.com/) for building containers
-- An AWS account with permissions to create EC2, VPC, S3, and IAM resources
+1. Go to deployed TrainForge instance
+2. Connect your GitHub repo (GitHub App install)
+3. Add AWS credentials to repo secrets
+4. Click "Train", select template, done
 
-### 1. Clone and Configure
+### For Developers
 
 ```bash
-cd ai-training-cluster-setup
+# Local dev
+cd web
+docker compose up
 
-# Copy and edit the example variables file
-cp terraform/terraform.tfvars.example terraform/terraform.tfvars
-```
+# Deploy to K8s
+kubectl apply -f k8s/
 
-Edit `terraform/terraform.tfvars`:
-
-- Set `allowed_ssh_cidrs` to your IP address
-- Set `key_pair_name` to your AWS key pair name
-- Adjust instance types if needed
-
-### 2. Deploy Infrastructure
-
-```bash
-# Initialize Terraform
-make init
-
-# Preview changes
-make plan
-
-# Deploy (this will create AWS resources - costs apply!)
-make apply
-```
-
-### 3. Build Training Container
-
-```bash
-# Build the Docker image locally
-make build
-
-# Or build and push to ECR
-make push
-```
-
-### 4. Run Training
-
-```bash
-# Run training locally (CPU or GPU if available)
-make train
-
-# Or submit to the remote GPU instance
-export INSTANCE_IP=$(cd terraform && terraform output -raw gpu_instance_public_ip)
-export S3_BUCKET=$(cd terraform && terraform output -raw artifacts_bucket_name)
-make submit
+# Create GitHub App, set credentials in k8s/secrets.yaml
 ```
 
 ## 💰 Cost Management
@@ -136,46 +85,24 @@ The `g4dn.xlarge` instance costs approximately $0.526/hour on-demand.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## 🔧 Configuration
+## How It Works
 
-### Terraform Variables
-
-| Variable            | Description                | Default       |
-| ------------------- | -------------------------- | ------------- |
-| `aws_region`        | AWS region for deployment  | `us-east-1`   |
-| `environment`       | Environment name           | `dev`         |
-| `gpu_instance_type` | EC2 instance type for GPU  | `g4dn.xlarge` |
-| `allowed_ssh_cidrs` | CIDR blocks for SSH access | `[]`          |
-| `key_pair_name`     | EC2 key pair name          | `""`          |
-| `enable_gpu_node`   | Create GPU instance        | `true`        |
-
-### Training Parameters
-
-Set via environment variables:
-
-```bash
-export EPOCHS=10
-export BATCH_SIZE=128
-export LEARNING_RATE=0.001
-make train
+```
+User clicks "Train"
+  → TrainForge triggers GitHub workflow
+  → GitHub Actions provisions AWS infrastructure
+  → Training runs on user's AWS
+  → Results uploaded to GitHub Artifacts
+  → Infrastructure destroyed
 ```
 
-## 🛠 Development
-
-### Local Training
-
-Test the training container locally:
-
-```bash
-# Build image
-make build
-
-# Run with CPU
-make train
+All compute happens in user's GitHub Actions + AWS account. TrainForge just orchestrates via GitHub API.e train
 
 # Run with local GPU (requires NVIDIA Docker runtime)
+
 EPOCHS=2 make train
-```
+
+````
 
 ### Modifying the Model
 
@@ -183,7 +110,7 @@ Edit `docker/src/model.py` to change the neural network architecture, then rebui
 
 ```bash
 make build
-```
+````
 
 ## 📈 Milestones
 
@@ -197,22 +124,28 @@ make build
 - [ ] **Milestone 2**: Training Platform & Observability
 
   - [ ] MLflow tracking server
-  - [ ] Prometheus + Grafana monitoring
-  - [ ] Container registry (ECR)
 
-- [ ] **Milestone 3**: End-to-End Automation
-  - [ ] Automated job submission
-  - [ ] CI/CD pipeline
-  - [ ] Autoscaling configuration
+## Templates
 
-## 🧹 Cleanup
+| Template  | Specs           | Cost/hr | Use Case              |
+| --------- | --------------- | ------- | --------------------- | -------- |
+| cpu-small | 2 vCPU, 4GB     | ~$0.05  | Testing, small models |
+| cpu-large | 8 vCPU, 32GB    | ~$0.20  | Data prep, CPU jobs   |
+| gpu-t4    | T4, 16GB VRAM   | ~$0.75  | Most DL workloads     |
+| gpu-a10   | A10G, 24GB VRAM | ~$1.50  | Large models          | ## Stack |
 
-To avoid ongoing AWS charges, destroy the infrastructure when done:
+**Frontend**: Next.js 16, Tailwind, shadcn/ui  
+**Backend**: FastAPI, PostgreSQL, Alembic  
+**Infra**: Kubernetes, Cloudflare Tunnel  
+**Automation**: GitHub Actions, Terraform
 
-```bash
-make destroy
-```
+## Security Model
 
-## 📄 License
+- TrainForge never sees AWS credentials (stored in GitHub Secrets)
+- GitHub App has minimal permissions (Contents + Actions write)
+- All compute runs in user's accounts
+- No code or data storage on TrainForge servers
 
-MIT License - see LICENSE file for details.
+## License
+
+MIT
