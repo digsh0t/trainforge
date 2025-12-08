@@ -2,6 +2,27 @@
 
 Self-service ML training platform. Click a button, train on cloud GPUs using your own AWS account via GitHub Actions. No credential sharing required.
 
+## 📊 Architecture
+
+```mermaid
+graph TB
+    subgraph AWS["☁️ AWS Cloud"]
+        direction TB
+        subgraph VPC["🔒 VPC"]
+            subgraph Public["Public Subnet"]
+                GPU["🖥️ GPU Node (g4dn)"]
+            end
+            subgraph Private["Private Subnet"]
+                Monitor["📊 Future: MLflow, Monitoring"]
+            end
+        end
+
+        S3[("🪣 S3 Bucket<br/>datasets | checkpoints | models")]
+    end
+
+    GPU <--> S3
+```
+
 ## Features
 
 - One-click training via GitHub Actions
@@ -61,29 +82,6 @@ make start-gpu
 ```
 
 The `g4dn.xlarge` instance costs approximately $0.526/hour on-demand.
-
-## 📊 Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         AWS Cloud                                │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                         VPC                                │  │
-│  │  ┌─────────────────┐       ┌─────────────────────────┐   │  │
-│  │  │  Public Subnet  │       │    Private Subnet       │   │  │
-│  │  │  ┌───────────┐  │       │                         │   │  │
-│  │  │  │ GPU Node  │  │       │  (Future: MLflow,       │   │  │
-│  │  │  │ (g4dn)    │  │       │   Monitoring Stack)     │   │  │
-│  │  │  └───────────┘  │       │                         │   │  │
-│  │  └─────────────────┘       └─────────────────────────┘   │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│                              │                                   │
-│  ┌───────────────────────────▼───────────────────────────────┐  │
-│  │                      S3 Bucket                             │  │
-│  │  datasets/ │ checkpoints/ │ models/ │ logs/ │ experiments/│  │
-│  └───────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-```
 
 ## How It Works
 
