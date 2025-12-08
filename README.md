@@ -2,13 +2,6 @@
 
 Self-service ML training platform. Click a button, train on cloud GPUs using your own AWS account via GitHub Actions. No credential sharing required.
 
-## 🔒 Security Model
-
-- **Zero Trust**: TrainForge never sees AWS credentials (stored in GitHub Secrets)
-- **Minimal Permissions**: GitHub App has minimal permissions (Contents + Actions write)
-- **Data Sovereignty**: All compute runs in user's accounts
-- **Privacy**: No code or data storage on TrainForge servers
-
 ## ⚙️ How It Works
 
 ```mermaid
@@ -35,22 +28,43 @@ All compute happens in user's GitHub Actions + AWS account. TrainForge just orch
 
 ```mermaid
 graph TB
-    subgraph AWS["☁️ AWS Cloud"]
+    User([👤 User])
+
+    subgraph Platform["🚀 TrainForge Platform"]
+        Web["🌐 Web UI"]
+    end
+
+    subgraph Orchestration["⚙️ Orchestration"]
+        GH["GitHub Actions<br/>(CI/CD Runners)"]
+    end
+
+    subgraph AWS["☁️ AWS Cloud (User Account)"]
         direction TB
         subgraph VPC["🔒 VPC"]
             subgraph Public["Public Subnet"]
                 GPU["🖥️ GPU Node (g4dn)"]
             end
             subgraph Private["Private Subnet"]
-                Monitor["📊 Future: MLflow, Monitoring"]
+                Monitor["📊 Future: MLflow"]
             end
         end
 
-        S3[("🪣 S3 Bucket<br/>datasets | checkpoints | models")]
+        S3[("🪣 S3 Bucket<br/>datasets | checkpoints")]
     end
 
-    GPU <--> S3
+    User -->|1. Submit Job| Web
+    Web -->|2. Dispatch Workflow| GH
+    GH -->|3. Terraform Apply| VPC
+    GH -->|4. Run Training| GPU
+    GPU <-->|5. Sync Data| S3
 ```
+
+## 🔒 Security Model
+
+- **Zero Trust**: TrainForge never sees AWS credentials (stored in GitHub Secrets)
+- **Minimal Permissions**: GitHub App has minimal permissions (Contents + Actions write)
+- **Data Sovereignty**: All compute runs in user's accounts
+- **Privacy**: No code or data storage on TrainForge servers
 
 ## Features
 
