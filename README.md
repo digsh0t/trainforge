@@ -87,16 +87,25 @@ The `g4dn.xlarge` instance costs approximately $0.526/hour on-demand.
 
 ## How It Works
 
-```
-User clicks "Train"
-  → TrainForge triggers GitHub workflow
-  → GitHub Actions provisions AWS infrastructure
-  → Training runs on user's AWS
-  → Results uploaded to GitHub Artifacts
-  → Infrastructure destroyed
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Web as Web UI
+    participant GH as GitHub Actions
+    participant AWS as AWS Cloud
+
+    User->>Web: Submit Training Job
+    Web->>GH: Trigger Workflow
+    GH->>AWS: Provision GPU Instance (Terraform)
+    activate AWS
+    AWS->>AWS: Run Training Container
+    AWS->>GH: Upload Model Artifacts
+    GH->>AWS: Destroy Infrastructure
+    deactivate AWS
 ```
 
-All compute happens in user's GitHub Actions + AWS account. TrainForge just orchestrates via GitHub API.e train
+All compute happens in user's GitHub Actions + AWS account. TrainForge just orchestrates via GitHub API.
 
 # Run with local GPU (requires NVIDIA Docker runtime)
 
