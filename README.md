@@ -38,7 +38,7 @@ graph TB
         GH["GitHub Actions<br/>(CI/CD Runners)"]
     end
 
-    subgraph AWS["☁️ AWS Cloud (User Account)"]
+    subgraph AWS["☁️ AWS Cloud"]
         direction TB
         subgraph VPC["🔒 VPC"]
             subgraph Public["Public Subnet"]
